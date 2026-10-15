@@ -1,7 +1,7 @@
 
 from app.schemas import ActionRequest
 from app.gate.policy_engine import evaluate_action
-from app.gate.risk_analyzer import analyze_sequence
+from app.gate.risk_analyzer import RISK_RULES, analyze_sequence
 
 
 def evaluate_plan(actions: list[ActionRequest]) -> dict:
@@ -32,10 +32,13 @@ def evaluate_plan(actions: list[ActionRequest]) -> dict:
         decision = "BLOCK"
         reasons.append("At least one action violates a security policy.")
 
-    # Certain sequence-level risks require blocking.
+    # Sequence-level rule effects come from the rule catalogue.
     blocking_rules = {
-        "unapproved_export_destination",
-        "export_send_delete_sequence",
+        name for name, rule in RISK_RULES.items() if rule["effect"] == "BLOCK"
+    }
+    approval_rules = {
+        name for name, rule in RISK_RULES.items()
+        if rule["effect"] == "REQUIRE_APPROVAL"
     }
 
     if any(
@@ -50,7 +53,7 @@ def evaluate_plan(actions: list[ActionRequest]) -> dict:
         item["decision"] == "REQUIRE_APPROVAL"
         for item in action_decisions
     ) or any(
-        finding["rule"] == "bulk_deletion"
+        finding["rule"] in approval_rules
         for finding in risk_findings
     )
 

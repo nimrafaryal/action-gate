@@ -1,9 +1,22 @@
 
+from app import config
 from app.schemas import ActionRequest
 
 
-APPROVED_EXPORT_DESTINATIONS = {
-    "internal_review"
+APPROVED_EXPORT_DESTINATIONS = config.APPROVED_EXPORT_DESTINATIONS
+
+# Human-readable catalogue of sequence rules (served to the dashboard).
+RISK_RULES = {
+    "unapproved_export_destination": {"severity": "HIGH", "effect": "BLOCK",
+        "description": "Customer data exported to a destination outside the approved list."},
+    "export_send_delete_sequence": {"severity": "CRITICAL", "effect": "BLOCK",
+        "description": "Unapproved export, then email, then deletion of the source records."},
+    "bulk_deletion": {"severity": "HIGH", "effect": "REQUIRE_APPROVAL",
+        "description": f"{config.BULK_DELETE_THRESHOLD}+ deletions in a single plan."},
+    "large_refund": {"severity": "HIGH", "effect": "REQUIRE_APPROVAL",
+        "description": f"Refund above the {config.REFUND_LIMIT:g} limit."},
+    "contact_email_change": {"severity": "HIGH", "effect": "REQUIRE_APPROVAL",
+        "description": "Changing a customer's contact email (account-takeover vector)."},
 }
 
 
@@ -77,15 +90,44 @@ def analyze_sequence(actions: list[ActionRequest]) -> list[dict]:
                     })
 
     # Rule 3: bulk deletion requires special review.
-    if len(delete_positions) >= 3:
+    if len(delete_positions) >= config.BULK_DELETE_THRESHOLD:
         findings.append({
             "rule": "bulk_deletion",
             "severity": "HIGH",
             "action_index": delete_positions[0],
             "message": (
-                "The plan contains three or more deletion actions "
-                "and requires human review."
+                f"The plan contains {len(delete_positions)} deletion actions "
+                f"(threshold {config.BULK_DELETE_THRESHOLD}) and requires human review."
             ),
         })
+
+    # Rule 4: unusually large refunds.
+    for index, action in enumerate(actions):
+        if action.tool != "refund.process":
+            continue
+        amount = action.arguments.get("amount")
+        if isinstance(amount, (int, float)) and not isinstance(amount, bool) \
+                and amount > config.REFUND_LIMIT:
+            findings.append({
+                "rule": "large_refund",
+                "severity": "HIGH",
+                "action_index": index,
+                "message": (
+                    f"Refund of {amount:g} exceeds the {config.REFUND_LIMIT:g} limit."
+                ),
+            })
+
+    # Rule 5: contact email changes enable account takeover.
+    for index, action in enumerate(actions):
+        if action.tool == "customer.update" and action.arguments.get("field") == "email":
+            findings.append({
+                "rule": "contact_email_change",
+                "severity": "HIGH",
+                "action_index": index,
+                "message": (
+                    f"Changes customer #{action.arguments.get('customer_id')} "
+                    f"email to '{action.arguments.get('value')}'."
+                ),
+            })
 
     return findings
