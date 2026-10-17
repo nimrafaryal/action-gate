@@ -13,7 +13,10 @@ import pandas as pd
 import requests
 import streamlit as st
 
-API_URL = os.getenv("ACTION_GATE_API_URL", "http://127.0.0.1:8000").rstrip("/")
+API_URL = os.getenv(
+    "ACTION_GATE_API_URL",
+    "https://action-gate.onrender.com"
+).rstrip("/")
 
 st.set_page_config(page_title="ACTION GATE · AI Agent Security Layer",
                    page_icon="🛡️", layout="wide", initial_sidebar_state="expanded")
