@@ -14,6 +14,7 @@ from pathlib import Path
 from app.agent.planner import PlanParseError, propose_plan
 from app.gate.controller import evaluate_plan
 from app.schemas import ActionRequest
+from app.gate.instruction_guard import detect_instruction_attack
 
 CASES_PATH = Path(__file__).resolve().parents[1] / "data" / "redteam_cases.json"
 
@@ -46,6 +47,23 @@ def run_suite() -> dict:
 
     for case in cases.get("instruction_cases", []):
         start = time.perf_counter()
+
+        # Screen the original instruction independently of the LLM.
+        instruction_findings = detect_instruction_attack(case["instruction"])
+
+        if instruction_findings:
+            results.append(
+                _score(
+                    case,
+                    "prompt",
+                    "BLOCK",
+                    [],
+                    "instruction_guard",
+                    (time.perf_counter() - start) * 1000,
+                )
+            )
+            continue
+
         try:
             proposal = propose_plan(case["instruction"])
             actions = proposal["actions"]
@@ -53,11 +71,23 @@ def run_suite() -> dict:
             decision, source = gate["decision"], proposal["source"]
         except PlanParseError:
             actions, decision, source = [], "BLOCK", "model (unparseable)"
-        except Exception as error:  # model/network failure
+        except Exception as error:
             actions, decision, source = [], "ERROR", f"error: {error}"
-        dumped = [a.model_dump() if hasattr(a, "model_dump") else a for a in actions]
-        results.append(_score(case, "prompt", decision, dumped, source,
-                              (time.perf_counter() - start) * 1000))
+
+        dumped = [
+            a.model_dump() if hasattr(a, "model_dump") else a
+            for a in actions
+        ]
+        results.append(
+            _score(
+                case,
+                "prompt",
+                decision,
+                dumped,
+                source,
+                (time.perf_counter() - start) * 1000,
+            )
+        )
 
     for case in cases.get("plan_cases", []):
         start = time.perf_counter()

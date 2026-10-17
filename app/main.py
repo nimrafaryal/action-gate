@@ -13,7 +13,7 @@ from app.storage.database import get_customers
 from app.tools.registry import TOOL_PERMISSIONS, execute_action
 from app.agent import llm_client
 from app.agent.planner import PlanParseError, propose_plan
-
+from app.gate.instruction_guard import detect_instruction_attack
 
 app = FastAPI(
     title="ACTION GATE",
@@ -78,20 +78,49 @@ def replay(request: PlanRequest):
     return result
 
 
+
 @app.post("/execute")
 def execute(action: ActionRequest):
+    """Execute one action only when all gate checks authorize it."""
+    plan_gate = evaluate_plan([action])
+
+    if not plan_gate["execution_authorized"]:
+        audit.log_event(
+            "/execute",
+            [action],
+            plan_gate,
+            source="manual",
+            executed=False,
+        )
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "Security gate denied execution.",
+                "gate": plan_gate,
+            },
+        )
+
     result = execute_action(action, principal="ai_agent")
+
     gate = {
         "decision": "ALLOW" if result.get("success") else result.get("decision", "BLOCK"),
         "reasons": [result.get("error")] if result.get("error") else ["Executed."],
+        "execution_authorized": bool(result.get("success")),
     }
-    audit.log_event("/execute", [action], gate, source="manual",
-                    executed=bool(result.get("success")))
+
+    audit.log_event(
+        "/execute",
+        [action],
+        gate,
+        source="manual",
+        executed=bool(result.get("success")),
+    )
 
     if not result.get("success"):
         raise HTTPException(status_code=403, detail=result)
 
     return result
+
 
 
 @app.get("/audit")
@@ -125,6 +154,31 @@ class AgentRequest(BaseModel):
 
 
 def _propose_and_gate(instruction: str) -> dict:
+        # Check the original instruction before trusting the model's plan.
+    instruction_findings = detect_instruction_attack(instruction)
+
+    if instruction_findings:
+        return {
+            "source": "instruction_guard",
+            "proposed_actions": [],
+            "instruction_findings": instruction_findings,
+            "gate": {
+                "decision": "BLOCK",
+                "reasons": [
+                    "The instruction contains a suspected security override attempt."
+                ],
+                "action_decisions": [],
+                "risk_findings": [
+                    {
+                        "rule": rule,
+                        "severity": "HIGH",
+                        "message": "Suspicious instruction override detected.",
+                    }
+                    for rule in instruction_findings
+                ],
+                "execution_authorized": False,
+            },
+        }
     try:
         proposal = propose_plan(instruction)
     except PlanParseError as error:

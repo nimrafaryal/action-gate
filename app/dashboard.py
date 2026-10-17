@@ -443,31 +443,168 @@ elif page == "🎯 Red Team":
         st.dataframe(df[["result", "id", "category", "expected", "decision", "input", "tools", "latency_ms", "source"]],
                      use_container_width=True, hide_index=True)
 
+
 elif page == "📜 Audit Log":
     st.markdown("### 📜 Audit Log")
-    c1, c2, c3 = st.columns([1, 1, 1])
+    st.caption(
+        "Search security decisions, filter events, and inspect the evidence "
+        "behind every gate decision."
+    )
+
+    c1, c2, c3 = st.columns([1, 1.3, 1.3])
     limit = c1.slider("Show last", 10, 500, 100, step=10)
-    decisions = c2.multiselect("Decision", ["ALLOW", "REQUIRE_APPROVAL", "BLOCK"],
-                               default=["ALLOW", "REQUIRE_APPROVAL", "BLOCK"])
+    decisions = c2.multiselect(
+        "Decision",
+        ["ALLOW", "REQUIRE_APPROVAL", "BLOCK"],
+        default=["ALLOW", "REQUIRE_APPROVAL", "BLOCK"],
+    )
+
     events = api("GET", "/audit", params={"limit": limit}) or []
-    endpoints = sorted({e["endpoint"] for e in events})
-    chosen = c3.multiselect("Endpoint", endpoints, default=endpoints)
-    rows = [e for e in events if e["decision"] in decisions and e["endpoint"] in chosen]
-    if rows:
-        st.dataframe(pd.DataFrame([{
-            "id": e["id"], "time": e["created_at"], "endpoint": e["endpoint"], "source": e["source"],
-            "decision": e["decision"], "executed": e["executed"],
-            "tools": ", ".join(a["tool"] for a in e["actions"]),
-            "rules": ", ".join(f["rule"] for f in e["findings"]),
-            "instruction": e["instruction"] or "",
-        } for e in rows]), use_container_width=True, hide_index=True)
-        st.download_button("⬇ Export JSON", json.dumps(rows, indent=2), "action_gate_audit.json", "application/json")
+    if isinstance(events, dict):
+        events = events.get("value", events.get("events", []))
+
+    if not isinstance(events, list):
+        events = []
+
+    endpoints = sorted({e.get("endpoint", "") for e in events})
+    chosen_endpoints = c3.multiselect(
+        "Endpoint", endpoints, default=endpoints
+    )
+
+    c4, c5 = st.columns([2, 1])
+    query = c4.text_input(
+        "Search audit evidence",
+        placeholder="Tool, rule, instruction, reason, or endpoint...",
+    )
+    execution_status = c5.selectbox(
+        "Execution status",
+        ["All", "Executed", "Not executed"],
+    )
+
+    filtered = []
+    for event in events:
+        if event.get("decision") not in decisions:
+            continue
+        if event.get("endpoint", "") not in chosen_endpoints:
+            continue
+
+        executed = bool(event.get("executed", False))
+        if execution_status == "Executed" and not executed:
+            continue
+        if execution_status == "Not executed" and executed:
+            continue
+
+        searchable = json.dumps(event, ensure_ascii=False).lower()
+        if query.strip().lower() not in searchable:
+            continue
+
+        filtered.append(event)
+
+    st.caption(
+        f"Showing {len(filtered)} matching events from "
+        f"{len(events)} retrieved records."
+    )
+
+    if filtered:
+        table_rows = []
+        for event in filtered:
+            actions = event.get("actions", [])
+            findings = event.get("findings", [])
+            table_rows.append({
+                "ID": event.get("id"),
+                "Time (UTC)": event.get("created_at", ""),
+                "Endpoint": event.get("endpoint", ""),
+                "Source": event.get("source") or "",
+                "Decision": event.get("decision", ""),
+                "Executed": bool(event.get("executed", False)),
+                "Tools": ", ".join(
+                    action.get("tool", "unknown") for action in actions
+                ),
+                "Risk rules": ", ".join(
+                    finding.get("rule", "unknown") for finding in findings
+                ),
+            })
+
+        st.dataframe(
+            pd.DataFrame(table_rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.download_button(
+            "⬇ Export filtered audit JSON",
+            data=json.dumps(filtered, indent=2, ensure_ascii=False),
+            file_name="action_gate_audit.json",
+            mime="application/json",
+        )
+
+        st.markdown(
+            '<div class="section">Decision evidence</div>',
+            unsafe_allow_html=True,
+        )
+
+        events_by_id = {event.get("id"): event for event in filtered}
+        event_ids = list(events_by_id)
+
+        selected_id = st.selectbox(
+            "Inspect event",
+            event_ids,
+            format_func=lambda event_id: (
+                f"#{event_id} · "
+                f"{events_by_id[event_id].get('decision', 'UNKNOWN')} · "
+                f"{', '.join(a.get('tool', 'unknown') for a in events_by_id[event_id].get('actions', []))}"
+            ),
+        )
+
+        selected = events_by_id[selected_id]
+        decision = selected.get("decision", "UNKNOWN")
+        reasons = selected.get("reasons", [])
+        findings = selected.get("findings", [])
+
+        verdict(decision, reasons)
+
+        d1, d2, d3 = st.columns(3)
+        d1.metric("Event ID", selected.get("id", "—"))
+        d2.metric("Execution", "Executed" if selected.get("executed") else "Not executed")
+        d3.metric("Risk findings", len(findings))
+
+        st.caption(
+            f"Timestamp: {selected.get('created_at', '—')} · "
+            f"Endpoint: {selected.get('endpoint', '—')} · "
+            f"Source: {selected.get('source') or '—'}"
+        )
+
+        with st.expander("Requested actions and arguments", expanded=True):
+            st.json(selected.get("actions", []))
+
+        with st.expander("Policy reasons"):
+            st.json(reasons)
+
+        with st.expander("Risk findings"):
+            if findings:
+                st.json(findings)
+            else:
+                st.info("No risk findings were recorded for this event.")
+
+        if selected.get("instruction"):
+            with st.expander("Original agent instruction"):
+                st.write(selected["instruction"])
+
     else:
-        st.info("No matching audit entries yet.")
+        st.info("No audit events match the selected filters.")
+
     with st.expander("Danger zone"):
-        if st.button("Clear audit log"):
-            api("DELETE", "/audit")
-            st.rerun()
+        st.warning(
+            "Clearing the audit log permanently deletes its recorded events. "
+            "Export any evidence you need before proceeding."
+        )
+        confirm_clear = st.checkbox("I understand this cannot be undone.")
+        if st.button("Clear audit log", disabled=not confirm_clear):
+            result = api("DELETE", "/audit")
+            if result is not None:
+                st.success("Audit log cleared.")
+                st.rerun()
+
 
 elif page == "📐 Policies":
     st.markdown("### 📐 Active Policies")
