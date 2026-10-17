@@ -15,7 +15,7 @@ from app.gate.risk_analyzer import RISK_RULES
 from app.gate.instruction_guard import detect_instruction_attack
 from app.gate.sensitive_intent_guard import detect_sensitive_intent
 from app.storage import audit
-from app.storage.database import get_customers
+from app.storage.database import get_customers, seed_customers
 from app.tools.registry import TOOL_PERMISSIONS, execute_action
 from app.agent import llm_client
 from app.agent.planner import PlanParseError, propose_plan
@@ -25,6 +25,12 @@ app = FastAPI(
     description="A security layer for AI agent actions.",
     version="0.2.0",
 )
+
+
+@app.on_event("startup")
+def startup_event():
+    """Initialize the demo database and seed customers on startup."""
+    seed_customers()
 
 
 class PlanRequest(BaseModel):
@@ -112,7 +118,6 @@ def replay(request: PlanRequest):
 def execute(action: ActionRequest):
     """Execute one action only when all gate checks authorize it."""
     plan_gate = evaluate_plan([action])
-
     if not plan_gate["execution_authorized"]:
         audit.log_event(
             "/execute",
@@ -130,7 +135,6 @@ def execute(action: ActionRequest):
         )
 
     result = execute_action(action, principal="ai_agent")
-
     gate = {
         "decision": (
             "ALLOW"
@@ -152,7 +156,6 @@ def execute(action: ActionRequest):
         source="manual",
         executed=bool(result.get("success")),
     )
-
     if not result.get("success"):
         raise HTTPException(status_code=403, detail=result)
 
@@ -188,7 +191,6 @@ def redteam_run():
 def _propose_and_gate(instruction: str) -> dict:
     # Check the original instruction before trusting the model's plan.
     instruction_findings = detect_instruction_attack(instruction)
-
     if instruction_findings:
         return {
             "source": "instruction_guard",
@@ -215,7 +217,6 @@ def _propose_and_gate(instruction: str) -> dict:
 
     # Independently inspect the original instruction for data exfiltration.
     sensitive_findings = detect_sensitive_intent(instruction)
-
     if sensitive_findings:
         return {
             "source": "sensitive_intent_guard",
@@ -246,7 +247,6 @@ def _propose_and_gate(instruction: str) -> dict:
     # Only call the model if the original instruction passes both checks.
     try:
         proposal = propose_plan(instruction)
-
     except PlanParseError as error:
         return {
             "source": "amd",
@@ -259,7 +259,6 @@ def _propose_and_gate(instruction: str) -> dict:
                 "execution_authorized": False,
             },
         }
-
     except Exception as error:
         raise HTTPException(
             status_code=502,
